@@ -21,7 +21,6 @@
   const firebaseApp = initializeApp(firebaseConfig);
   const db = getDatabase(firebaseApp);
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
   const uid = () => Math.random().toString(36).slice(2, 9);
 
   const shuffle = arr => {
@@ -52,7 +51,6 @@
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  // ── State ──────────────────────────────────────────────────────────────────
   const state = {
     screen: 'home',
     userId: uid(),
@@ -67,8 +65,11 @@
 
   let roomListener = null;
 
-  // ── Firebase ops ───────────────────────────────────────────────────────────
   function roomRef(code) { return ref(db, 'rooms/' + code); }
+
+  function getShareLink(code) {
+    return window.location.origin + window.location.pathname + '?room=' + code;
+  }
 
   async function createRoomInDB(code) {
     await set(roomRef(code), {
@@ -98,7 +99,6 @@
         state.submitted = false;
         state.myAnswer = '';
       }
-      // Don't re-render if user is typing
       const focused = document.activeElement;
       const isTyping = focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA');
       if (isTyping) {
@@ -115,7 +115,7 @@
     const pc = Object.keys(room.participants || {}).length;
     const sc = Object.keys(room.submissions || {}).length;
     const statEl = document.querySelector('.stat');
-    if (statEl) statEl.textContent = `👥 ${pc} in room (including you)`;
+    if (statEl) statEl.textContent = `Participants in room: ${pc}`;
     const pt = document.querySelector('.progress-text');
     if (pt) pt.textContent = `${sc} of ${pc} answered`;
     const pb = document.querySelector('.progress-bar');
@@ -123,7 +123,6 @@
     if (room.phase === 'reveal') render();
   }
 
-  // ── Actions ────────────────────────────────────────────────────────────────
   async function createRoom() {
     const code = Math.random().toString(36).slice(2, 7).toUpperCase();
     await createRoomInDB(code);
@@ -134,11 +133,11 @@
     render();
   }
 
-  async function joinRoom() {
-    const code = state.joinCode.trim().toUpperCase();
+  async function joinRoom(code) {
+    code = (code || state.joinCode).trim().toUpperCase();
     if (!code) return;
     const ok = await joinRoomInDB(code);
-    if (!ok) { alert('Room not found. Check the code and try again.'); return; }
+    if (!ok) { alert('Room not found. Check the link and try again.'); return; }
     state.roomCode = code;
     state.role = 'participant';
     state.screen = 'participant';
@@ -189,7 +188,14 @@
     render();
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  function copyLink() {
+    const link = getShareLink(state.roomCode);
+    navigator.clipboard.writeText(link).then(() => {
+      const btn = document.getElementById('copyBtn');
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy Link'; }, 2000); }
+    });
+  }
+
   function render() {
     const app = document.getElementById('app');
     if (state.screen === 'home')        { app.innerHTML = renderHome();        bindHome();        return; }
@@ -205,34 +211,24 @@
         <p class="subtitle">Anonymous answers, randomly assigned.<br>Everyone shares — no one's exposed.</p>
         <div class="divider"></div>
         <div class="section">
-          <span class="label">Join a Session</span>
-          <input type="text" id="joinInput" placeholder="ROOM CODE" maxlength="8" value="${esc(state.joinCode)}">
-          <button class="btn-primary" id="joinBtn">Join Room</button>
-        </div>
-        <div class="or-row"><span class="or-line"></span><span class="or-text">or</span><span class="or-line"></span></div>
-        <div class="section">
           <span class="label">Lead a Session</span>
-          <button class="btn-secondary" id="createBtn">Create New Room</button>
+          <button class="btn-primary" id="createBtn">Create New Room</button>
         </div>
       </div>`;
   }
 
   function bindHome() {
-    const ji = document.getElementById('joinInput');
-    ji.addEventListener('input', e => { state.joinCode = e.target.value.toUpperCase(); e.target.value = state.joinCode; });
-    ji.addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(); });
-    document.getElementById('joinBtn').addEventListener('click', joinRoom);
     document.getElementById('createBtn').addEventListener('click', createRoom);
   }
 
   function renderAnswerArea() {
     if (state.submitted) {
-      return `<div class="status-box">✅ Your answer is in the hat — waiting for others…</div>`;
+      return `<div class="status-box">Your answer is in the hat. Waiting for others...</div>`;
     }
     return `
       <div class="answer-section">
         <span class="label">Your Answer</span>
-        <textarea id="answerInput" rows="3" placeholder="Type your answer here…">${esc(state.myAnswer)}</textarea>
+        <textarea id="answerInput" rows="3" placeholder="Type your answer here...">${esc(state.myAnswer)}</textarea>
         <button class="btn-primary" id="submitBtn">Put it in the Hat 🎩</button>
       </div>`;
   }
@@ -247,18 +243,28 @@
 
   function renderFacilitator() {
     const room = state.room;
-    if (!room) return '<p>Loading…</p>';
+    if (!room) return '<p>Loading...</p>';
     const pc = Object.keys(room.participants || {}).length;
     const sc = Object.keys(room.submissions || {}).length;
     const pct = pc > 0 ? Math.min(100, (sc / pc) * 100) : 0;
     const myDrawn = room.assignments?.[state.userId];
+    const shareLink = getShareLink(state.roomCode);
     let body = '';
+
+    const sharebox = `
+      <div class="share-box">
+        <span class="label">Share this link in Zoom chat</span>
+        <div class="share-link">${esc(shareLink)}</div>
+        <button class="btn-copy" id="copyBtn">Copy Link</button>
+      </div>`;
 
     if (room.phase === 'waiting') {
       body = `
         <div class="section">
+          ${sharebox}
+          <div class="divider"></div>
           <span class="label">Ask a Question</span>
-          <textarea id="qDraft" rows="3" placeholder="Type your question here…">${esc(state.questionDraft)}</textarea>
+          <textarea id="qDraft" rows="3" placeholder="Type your question here...">${esc(state.questionDraft)}</textarea>
           <button class="btn-primary" id="openBtn">Open Question to Everyone</button>
         </div>`;
     }
@@ -279,8 +285,8 @@
 
     if (room.phase === 'reveal') {
       const mySlip = myDrawn
-        ? `<span class="label">You Drew…</span><div class="drawn-answer">🎩 ${esc(myDrawn)}</div>`
-        : `<div class="status-box">⚠️ You didn't submit an answer so you weren't assigned one.</div>`;
+        ? `<span class="label">You Drew...</span><div class="drawn-answer">🎩 ${esc(myDrawn)}</div>`
+        : `<div class="status-box">You did not submit an answer so you were not assigned one.</div>`;
       body = `
         <div class="section">
           <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
@@ -296,11 +302,13 @@
         <span class="role-tag">FACILITATOR</span>
         <span class="code-tag">Room: <strong>${state.roomCode}</strong></span>
       </div>
-      <div class="stat">👥 ${pc} in room (including you)</div>
+      <div class="stat">Participants in room: ${pc}</div>
       ${body}`;
   }
 
   function bindFacilitator() {
+    const copyBtn = document.getElementById('copyBtn');
+    if (copyBtn) copyBtn.addEventListener('click', copyLink);
     const qd = document.getElementById('qDraft');
     if (qd) {
       qd.addEventListener('input', e => state.questionDraft = e.target.value);
@@ -315,14 +323,14 @@
 
   function renderParticipant() {
     const room = state.room;
-    if (!room) return '<p>Loading…</p>';
+    if (!room) return '<p>Loading...</p>';
     const myDrawn = room.assignments?.[state.userId];
     let body = '';
 
     if (room.phase === 'waiting') {
       body = `<div class="center">
         <div style="font-size:56px;margin-bottom:14px">⏳</div>
-        <p class="waiting-msg">Waiting for the facilitator to ask a question…</p>
+        <p class="waiting-msg">You are in the room.<br>Waiting for the facilitator to ask a question...</p>
       </div>`;
     }
 
@@ -338,13 +346,13 @@
       body = myDrawn
         ? `<div class="section">
              <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
-             <span class="label">You Drew…</span>
+             <span class="label">You Drew...</span>
              <div class="drawn-answer">🎩 ${esc(myDrawn)}</div>
-             <p class="hint">Someone in the room wrote this. Read it aloud when it's your turn.</p>
+             <p class="hint">Someone in the room wrote this. Read it aloud when it is your turn.</p>
            </div>`
         : `<div class="section">
              <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
-             <div class="status-box">⚠️ No answer assigned — you may not have submitted in time.</div>
+             <div class="status-box">No answer was assigned to you. You may not have submitted in time.</div>
            </div>`;
     }
 
@@ -360,51 +368,42 @@
     bindAnswerArea();
   }
 
-  // Boot
-  render();
+  // Check URL for room code on load
+  function boot() {
+    const params = new URLSearchParams(window.location.search);
+    const roomCode = params.get('room');
+    if (roomCode) {
+      joinRoom(roomCode.toUpperCase());
+    } else {
+      render();
+    }
+  }
+
+  boot();
 </script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    min-height: 100vh; background: #f0f0ec;
-    display: flex; align-items: flex-start; justify-content: center;
-    padding: 32px 16px; font-family: Georgia, serif; color: #1a1a1a;
-  }
-  #app {
-    background: #ffffff; border: 1px solid #cccccc; border-radius: 16px;
-    padding: 36px 32px; width: 100%; max-width: 560px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-  }
+  body { min-height: 100vh; background: #f0f0ec; display: flex; align-items: flex-start; justify-content: center; padding: 32px 16px; font-family: Georgia, serif; color: #1a1a1a; }
+  #app { background: #ffffff; border: 1px solid #cccccc; border-radius: 16px; padding: 36px 32px; width: 100%; max-width: 560px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
   .center { text-align: center; }
   .hat-icon { font-size: 64px; margin-bottom: 10px; }
-  h1 { font-size: 32px; margin-bottom: 10px; color: #1a1a1a; letter-spacing: 0.5px; }
+  h1 { font-size: 32px; margin-bottom: 10px; color: #1a1a1a; }
   .subtitle { font-size: 17px; color: #555; margin-bottom: 24px; line-height: 1.6; }
   .divider { border-top: 2px solid #e0e0e0; margin: 24px 0; }
   .section { margin-bottom: 24px; }
   .label { font-size: 12px; letter-spacing: 2px; color: #777; margin-bottom: 10px; font-family: monospace; display: block; text-transform: uppercase; }
-  input[type="text"] {
-    width: 100%; padding: 14px 16px; background: #fff; border: 2px solid #ccc;
-    border-radius: 8px; color: #1a1a1a; font-size: 20px; margin-bottom: 12px;
-    font-family: monospace; letter-spacing: 4px; text-align: center;
-  }
-  input[type="text"]:focus { outline: none; border-color: #2e6b3e; }
-  textarea {
-    width: 100%; padding: 14px 16px; background: #fff; border: 2px solid #ccc;
-    border-radius: 8px; color: #1a1a1a; font-size: 18px; margin-bottom: 12px;
-    font-family: Georgia, serif; resize: vertical; line-height: 1.6;
-  }
+  textarea { width: 100%; padding: 14px 16px; background: #fff; border: 2px solid #ccc; border-radius: 8px; color: #1a1a1a; font-size: 18px; margin-bottom: 12px; font-family: Georgia, serif; resize: vertical; line-height: 1.6; }
   textarea:focus { outline: none; border-color: #2e6b3e; }
-  button {
-    width: 100%; padding: 15px; border: none; border-radius: 8px;
-    color: #fff; font-size: 17px; cursor: pointer;
-    font-family: Georgia, serif; margin-bottom: 8px; font-weight: bold;
-  }
+  button { width: 100%; padding: 15px; border: none; border-radius: 8px; color: #fff; font-size: 17px; cursor: pointer; font-family: Georgia, serif; margin-bottom: 8px; font-weight: bold; }
   .btn-primary { background: #2e6b3e; }
   .btn-primary:hover { background: #3a7a4a; }
   .btn-secondary { background: #fff; border: 2px solid #2e6b3e; color: #2e6b3e; font-weight: bold; }
-  .btn-secondary:hover { background: #f0f8f2; }
   .btn-danger { background: #8b2e2e; }
   .btn-danger:hover { background: #a03535; }
+  .btn-copy { background: #444; font-size: 14px; padding: 10px; margin-top: 8px; border-radius: 6px; }
+  .btn-copy:hover { background: #222; }
+  .share-box { background: #f8f8f4; border: 2px solid #ccc; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+  .share-link { font-family: monospace; font-size: 13px; color: #2e6b3e; word-break: break-all; margin: 8px 0 4px; line-height: 1.6; }
   .or-row { display: flex; align-items: center; gap: 12px; margin: 4px 0 20px; }
   .or-line { flex: 1; height: 2px; background: #e0e0e0; }
   .or-text { color: #999; font-size: 14px; }
@@ -413,12 +412,7 @@
   .role-tag.participant { background: #dcf0e4; color: #1a5c2e; }
   .code-tag { font-size: 15px; color: #444; font-family: monospace; letter-spacing: 1px; }
   .stat { font-size: 15px; color: #555; margin-bottom: 20px; }
-  .question-box {
-    background: #f8f8f4; border: 2px solid #ccc; border-radius: 10px;
-    padding: 16px 18px; margin-bottom: 16px;
-    display: flex; gap: 12px; align-items: flex-start;
-    font-size: 18px; line-height: 1.6;
-  }
+  .question-box { background: #f8f8f4; border: 2px solid #ccc; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; display: flex; gap: 12px; align-items: flex-start; font-size: 18px; line-height: 1.6; }
   .q-label { background: #2e6b3e; color: #fff; font-weight: bold; font-size: 13px; padding: 3px 10px; border-radius: 4px; flex-shrink: 0; margin-top: 3px; }
   .answer-section { background: #f0f8f2; border: 2px solid #2e6b3e; border-radius: 10px; padding: 18px; margin-bottom: 16px; }
   .answer-section .label { color: #2e6b3e; margin-bottom: 8px; }
@@ -426,11 +420,9 @@
   .progress-bar { height: 100%; background: #2e6b3e; border-radius: 4px; transition: width 0.5s; }
   .progress-text { font-size: 14px; color: #666; font-family: monospace; margin-bottom: 16px; }
   .hint { font-size: 14px; color: #888; margin-top: 8px; text-align: center; font-style: italic; }
-  .answer-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
-  .answer-item { background: #f8f8f4; border: 1px solid #ccc; border-radius: 8px; padding: 14px 18px; font-size: 17px; line-height: 1.5; }
   .status-box { background: #f0f8f2; border: 2px dashed #2e6b3e; border-radius: 8px; padding: 18px; font-size: 16px; color: #2e6b3e; text-align: center; font-family: monospace; margin-bottom: 12px; }
   .drawn-answer { background: #f0f8f2; border: 3px solid #2e6b3e; border-radius: 10px; padding: 22px 20px; font-size: 22px; font-style: italic; line-height: 1.6; margin-bottom: 12px; color: #1a1a1a; }
-  .waiting-msg { color: #888; font-size: 17px; line-height: 1.7; font-style: italic; margin-top: 16px; }
+  .waiting-msg { color: #555; font-size: 18px; line-height: 1.8; margin-top: 16px; }
   .ctrl-divider { border-top: 2px dashed #e0e0e0; margin: 20px 0; }
   .ctrl-label { font-size: 12px; letter-spacing: 2px; color: #aaa; font-family: monospace; text-align: center; margin-bottom: 14px; display: block; }
 </style>
