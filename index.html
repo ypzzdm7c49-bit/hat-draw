@@ -21,7 +21,15 @@
   const firebaseApp = initializeApp(firebaseConfig);
   const db = getDatabase(firebaseApp);
 
-  const uid = () => Math.random().toString(36).slice(2, 9);
+  // Persist userId across refreshes
+  function getPersistentUserId() {
+    let id = localStorage.getItem('hatdraw_userid');
+    if (!id) {
+      id = Math.random().toString(36).slice(2, 9);
+      localStorage.setItem('hatdraw_userid', id);
+    }
+    return id;
+  }
 
   const shuffle = arr => {
     const a = [...arr];
@@ -53,14 +61,13 @@
 
   const state = {
     screen: 'home',
-    userId: uid(),
+    userId: getPersistentUserId(),
     role: 'participant',
     roomCode: null,
     room: null,
     myAnswer: '',
     submitted: false,
     questionDraft: '',
-    joinCode: '',
   };
 
   let roomListener = null;
@@ -95,10 +102,17 @@
       const data = snap.val();
       const prevPhase = state.room?.phase;
       state.room = data;
+
+      // Sync submitted state from Firebase on refresh
+      if (data.phase === 'open' && data.submissions && data.submissions[state.userId]) {
+        state.submitted = true;
+        state.myAnswer = data.submissions[state.userId];
+      }
       if (prevPhase !== 'waiting' && data.phase === 'waiting') {
         state.submitted = false;
         state.myAnswer = '';
       }
+
       const focused = document.activeElement;
       const isTyping = focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA');
       if (isTyping) {
@@ -109,17 +123,47 @@
     });
   }
 
+  function everyoneAnswered() {
+    const room = state.room;
+    if (!room) return false;
+    const pc = Object.keys(room.participants || {}).length;
+    const sc = Object.keys(room.submissions || {}).length;
+    return pc > 0 && sc >= pc;
+  }
+
+  function isLastToAnswer() {
+    const room = state.room;
+    if (!room || state.role !== 'participant') return false;
+    const pc = Object.keys(room.participants || {}).length;
+    const sc = Object.keys(room.submissions || {}).length;
+    const subs = room.submissions || {};
+    // They just submitted and everyone else had already answered
+    return state.submitted && subs[state.userId] && (sc === pc) &&
+      Object.keys(subs).filter(id => id !== state.userId).length === pc - 1;
+  }
+
   function updateStatusOnly() {
     const room = state.room;
     if (!room) return;
     const pc = Object.keys(room.participants || {}).length;
     const sc = Object.keys(room.submissions || {}).length;
     const statEl = document.querySelector('.stat');
-    if (statEl) statEl.textContent = `Participants in room: ${pc}`;
+    if (statEl) statEl.textContent = `Participants in session: ${pc}`;
     const pt = document.querySelector('.progress-text');
     if (pt) pt.textContent = `${sc} of ${pc} answered`;
     const pb = document.querySelector('.progress-bar');
     if (pb) pb.style.width = pc > 0 ? Math.min(100, sc/pc*100)+'%' : '0%';
+    // Update close button color
+    const closeBtn = document.getElementById('closeBtn');
+    if (closeBtn) {
+      if (everyoneAnswered()) {
+        closeBtn.classList.add('btn-success');
+        closeBtn.classList.remove('btn-danger');
+      } else {
+        closeBtn.classList.add('btn-danger');
+        closeBtn.classList.remove('btn-success');
+      }
+    }
     if (room.phase === 'reveal') render();
   }
 
@@ -134,7 +178,7 @@
   }
 
   async function joinRoom(code) {
-    code = (code || state.joinCode).trim().toUpperCase();
+    code = (code || '').trim().toUpperCase();
     if (!code) return;
     const ok = await joinRoomInDB(code);
     if (!ok) { alert('Room not found. Check the link and try again.'); return; }
@@ -183,6 +227,9 @@
   async function submitAnswer() {
     const ans = state.myAnswer.trim();
     if (!ans) return;
+    // Prevent double submission
+    const current = state.room.submissions || {};
+    if (current[state.userId]) return;
     await update(ref(db, 'rooms/' + state.roomCode + '/submissions'), { [state.userId]: ans });
     state.submitted = true;
     render();
@@ -208,10 +255,9 @@
       <div class="center">
         <div class="hat-icon">🎩</div>
         <h1>Draw from the Hat</h1>
-        <p class="subtitle">Anonymous answers, randomly assigned.<br>Everyone shares — no one's exposed.</p>
+        <p class="subtitle">Anonymous answers, randomly assigned.<br>Everyone shares — no one is exposed.</p>
         <div class="divider"></div>
         <div class="section">
-          <span class="label">Lead a Session</span>
           <button class="btn-primary" id="createBtn">Create New Room</button>
         </div>
       </div>`;
@@ -222,10 +268,28 @@
   }
 
   function renderAnswerArea() {
-    if (state.submitted) {
-      return `<div class="status-box">Your answer is in the hat. Waiting for others...</div>`;
+    const subs = state.room.submissions || {};
+    const alreadySubmitted = !!subs[state.userId];
+
+    if (alreadySubmitted || state.submitted) {
+      const pc = Object.keys(state.room.participants || {}).length;
+      const sc = Object.keys(subs).length;
+      const isLast = sc >= pc;
+      return `
+        <div class="status-box">
+          Your answer is in the hat. Waiting for others...
+        </div>
+        ${isLast && state.role === 'participant' ? '<div class="nudge">Everyone else has answered — take your time!</div>' : ''}`;
     }
+
+    const pc = Object.keys(state.room.participants || {}).length;
+    const sc = Object.keys(subs).length;
+    const remaining = pc - sc;
+    const isLast = remaining === 1 && !subs[state.userId];
+
     return `
+      ${isLast ? '<div class="nudge">Everyone else has answered — take your time!</div>' : ''}
+      <div class="anon-notice">This is an anonymous forum. Your identity is not recorded or shared.</div>
       <div class="answer-section">
         <span class="label">Your Answer</span>
         <textarea id="answerInput" rows="3" placeholder="Type your answer here...">${esc(state.myAnswer)}</textarea>
@@ -249,6 +313,7 @@
     const pct = pc > 0 ? Math.min(100, (sc / pc) * 100) : 0;
     const myDrawn = room.assignments?.[state.userId];
     const shareLink = getShareLink(state.roomCode);
+    const allAnswered = everyoneAnswered();
     let body = '';
 
     const sharebox = `
@@ -278,8 +343,8 @@
           <span class="ctrl-label">FACILITATOR CONTROLS</span>
           <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
           <p class="progress-text">${sc} of ${pc} answered</p>
-          <button class="btn-danger" id="closeBtn">Close &amp; Draw from Hat</button>
-          <p class="hint">Close early if someone left without answering.</p>
+          <button class="${allAnswered ? 'btn-success' : 'btn-danger'}" id="closeBtn">Close &amp; Draw from Hat</button>
+          <p class="hint">${allAnswered ? 'Everyone has answered! Ready to draw.' : 'Close early if someone left without answering.'}</p>
         </div>`;
     }
 
@@ -302,7 +367,7 @@
         <span class="role-tag">FACILITATOR</span>
         <span class="code-tag">Room: <strong>${state.roomCode}</strong></span>
       </div>
-      <div class="stat">Participants in room: ${pc}</div>
+      <div class="stat">Participants in session: ${pc}</div>
       ${body}`;
   }
 
@@ -329,8 +394,9 @@
 
     if (room.phase === 'waiting') {
       body = `<div class="center">
-        <div style="font-size:56px;margin-bottom:14px">⏳</div>
-        <p class="waiting-msg">You are in the room.<br>Waiting for the facilitator to ask a question...</p>
+        <div style="font-size:56px;margin-bottom:14px">🎩</div>
+        <p class="waiting-msg">You're in.<br>Waiting for the first question...</p>
+        <p class="anon-notice" style="margin-top:20px">This is an anonymous forum.<br>Your identity is not recorded or shared.</p>
       </div>`;
     }
 
@@ -348,7 +414,7 @@
              <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
              <span class="label">You Drew...</span>
              <div class="drawn-answer">🎩 ${esc(myDrawn)}</div>
-             <p class="hint">Someone in the room wrote this. Read it aloud when it is your turn.</p>
+             <p class="hint">Someone in the session wrote this. Read it aloud when it is your turn.</p>
            </div>`
         : `<div class="section">
              <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
@@ -359,7 +425,6 @@
     return `
       <div class="top-bar">
         <span class="role-tag participant">PARTICIPANT</span>
-        <span class="code-tag">Room: <strong>${state.roomCode}</strong></span>
       </div>
       ${body}`;
   }
@@ -368,7 +433,6 @@
     bindAnswerArea();
   }
 
-  // Check URL for room code on load
   function boot() {
     const params = new URLSearchParams(window.location.search);
     const roomCode = params.get('room');
@@ -397,16 +461,14 @@
   button { width: 100%; padding: 15px; border: none; border-radius: 8px; color: #fff; font-size: 17px; cursor: pointer; font-family: Georgia, serif; margin-bottom: 8px; font-weight: bold; }
   .btn-primary { background: #2e6b3e; }
   .btn-primary:hover { background: #3a7a4a; }
-  .btn-secondary { background: #fff; border: 2px solid #2e6b3e; color: #2e6b3e; font-weight: bold; }
   .btn-danger { background: #8b2e2e; }
   .btn-danger:hover { background: #a03535; }
+  .btn-success { background: #2e6b3e; box-shadow: 0 0 0 4px #a8d5b5; }
+  .btn-success:hover { background: #3a7a4a; }
   .btn-copy { background: #444; font-size: 14px; padding: 10px; margin-top: 8px; border-radius: 6px; }
   .btn-copy:hover { background: #222; }
   .share-box { background: #f8f8f4; border: 2px solid #ccc; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
   .share-link { font-family: monospace; font-size: 13px; color: #2e6b3e; word-break: break-all; margin: 8px 0 4px; line-height: 1.6; }
-  .or-row { display: flex; align-items: center; gap: 12px; margin: 4px 0 20px; }
-  .or-line { flex: 1; height: 2px; background: #e0e0e0; }
-  .or-text { color: #999; font-size: 14px; }
   .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
   .role-tag { font-size: 12px; letter-spacing: 2px; background: #dce8ff; color: #2244aa; padding: 5px 12px; border-radius: 20px; font-family: monospace; }
   .role-tag.participant { background: #dcf0e4; color: #1a5c2e; }
@@ -416,13 +478,15 @@
   .q-label { background: #2e6b3e; color: #fff; font-weight: bold; font-size: 13px; padding: 3px 10px; border-radius: 4px; flex-shrink: 0; margin-top: 3px; }
   .answer-section { background: #f0f8f2; border: 2px solid #2e6b3e; border-radius: 10px; padding: 18px; margin-bottom: 16px; }
   .answer-section .label { color: #2e6b3e; margin-bottom: 8px; }
+  .anon-notice { font-size: 14px; color: #777; font-style: italic; text-align: center; margin-bottom: 14px; line-height: 1.6; }
+  .nudge { background: #fff8e1; border: 2px solid #f0c040; border-radius: 8px; padding: 14px 16px; font-size: 15px; color: #7a5c00; text-align: center; margin-bottom: 12px; line-height: 1.5; }
   .progress-wrap { height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
   .progress-bar { height: 100%; background: #2e6b3e; border-radius: 4px; transition: width 0.5s; }
   .progress-text { font-size: 14px; color: #666; font-family: monospace; margin-bottom: 16px; }
   .hint { font-size: 14px; color: #888; margin-top: 8px; text-align: center; font-style: italic; }
   .status-box { background: #f0f8f2; border: 2px dashed #2e6b3e; border-radius: 8px; padding: 18px; font-size: 16px; color: #2e6b3e; text-align: center; font-family: monospace; margin-bottom: 12px; }
   .drawn-answer { background: #f0f8f2; border: 3px solid #2e6b3e; border-radius: 10px; padding: 22px 20px; font-size: 22px; font-style: italic; line-height: 1.6; margin-bottom: 12px; color: #1a1a1a; }
-  .waiting-msg { color: #555; font-size: 18px; line-height: 1.8; margin-top: 16px; }
+  .waiting-msg { color: #555; font-size: 20px; line-height: 1.8; margin-top: 16px; }
   .ctrl-divider { border-top: 2px dashed #e0e0e0; margin: 20px 0; }
   .ctrl-label { font-size: 12px; letter-spacing: 2px; color: #aaa; font-family: monospace; text-align: center; margin-bottom: 14px; display: block; }
 </style>
