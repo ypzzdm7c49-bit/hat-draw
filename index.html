@@ -21,7 +21,6 @@
   const firebaseApp = initializeApp(firebaseConfig);
   const db = getDatabase(firebaseApp);
 
-  // Persist userId across refreshes
   function getPersistentUserId() {
     let id = localStorage.getItem('hatdraw_userid');
     if (!id) {
@@ -103,7 +102,6 @@
       const prevPhase = state.room?.phase;
       state.room = data;
 
-      // Sync submitted state from Firebase on refresh
       if (data.phase === 'open' && data.submissions && data.submissions[state.userId]) {
         state.submitted = true;
         state.myAnswer = data.submissions[state.userId];
@@ -131,17 +129,6 @@
     return pc > 0 && sc >= pc;
   }
 
-  function isLastToAnswer() {
-    const room = state.room;
-    if (!room || state.role !== 'participant') return false;
-    const pc = Object.keys(room.participants || {}).length;
-    const sc = Object.keys(room.submissions || {}).length;
-    const subs = room.submissions || {};
-    // They just submitted and everyone else had already answered
-    return state.submitted && subs[state.userId] && (sc === pc) &&
-      Object.keys(subs).filter(id => id !== state.userId).length === pc - 1;
-  }
-
   function updateStatusOnly() {
     const room = state.room;
     if (!room) return;
@@ -153,16 +140,12 @@
     if (pt) pt.textContent = `${sc} of ${pc} answered`;
     const pb = document.querySelector('.progress-bar');
     if (pb) pb.style.width = pc > 0 ? Math.min(100, sc/pc*100)+'%' : '0%';
-    // Update close button color
     const closeBtn = document.getElementById('closeBtn');
     if (closeBtn) {
-      if (everyoneAnswered()) {
-        closeBtn.classList.add('btn-success');
-        closeBtn.classList.remove('btn-danger');
-      } else {
-        closeBtn.classList.add('btn-danger');
-        closeBtn.classList.remove('btn-success');
-      }
+      const all = everyoneAnswered();
+      closeBtn.className = all ? 'btn-success' : 'btn-danger';
+      const hint = document.querySelector('.close-hint');
+      if (hint) hint.textContent = all ? 'Everyone has answered! Ready to draw.' : 'Close early if someone left without answering.';
     }
     if (room.phase === 'reveal') render();
   }
@@ -227,7 +210,6 @@
   async function submitAnswer() {
     const ans = state.myAnswer.trim();
     if (!ans) return;
-    // Prevent double submission
     const current = state.room.submissions || {};
     if (current[state.userId]) return;
     await update(ref(db, 'rooms/' + state.roomCode + '/submissions'), { [state.userId]: ans });
@@ -240,6 +222,13 @@
     navigator.clipboard.writeText(link).then(() => {
       const btn = document.getElementById('copyBtn');
       if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy Link'; }, 2000); }
+    });
+  }
+
+  function copyConcern(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.getElementById('concernBtn');
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy to clipboard'; }, 2000); }
     });
   }
 
@@ -267,25 +256,29 @@
     document.getElementById('createBtn').addEventListener('click', createRoom);
   }
 
+  function renderShareBox() {
+    const shareLink = getShareLink(state.roomCode);
+    return `
+      <div class="share-box">
+        <span class="label">Share this link in Zoom chat</span>
+        <div class="share-link">${esc(shareLink)}</div>
+        <button class="btn-copy" id="copyBtn">Copy Link</button>
+      </div>`;
+  }
+
   function renderAnswerArea() {
     const subs = state.room.submissions || {};
-    const alreadySubmitted = !!subs[state.userId];
-
-    if (alreadySubmitted || state.submitted) {
-      const pc = Object.keys(state.room.participants || {}).length;
-      const sc = Object.keys(subs).length;
-      const isLast = sc >= pc;
-      return `
-        <div class="status-box">
-          Your answer is in the hat. Waiting for others...
-        </div>
-        ${isLast && state.role === 'participant' ? '<div class="nudge">Everyone else has answered — take your time!</div>' : ''}`;
-    }
-
+    const alreadyAnswered = !!subs[state.userId];
     const pc = Object.keys(state.room.participants || {}).length;
     const sc = Object.keys(subs).length;
-    const remaining = pc - sc;
-    const isLast = remaining === 1 && !subs[state.userId];
+
+    if (alreadyAnswered || state.submitted) {
+      return `<div class="status-box">Your answer is in the hat. Waiting for others...</div>`;
+    }
+
+    // Only show nudge if this person is the last one who hasn't answered yet
+    const othersAnswered = sc;
+    const isLast = (pc - othersAnswered) === 1;
 
     return `
       ${isLast ? '<div class="nudge">Everyone else has answered — take your time!</div>' : ''}
@@ -312,21 +305,13 @@
     const sc = Object.keys(room.submissions || {}).length;
     const pct = pc > 0 ? Math.min(100, (sc / pc) * 100) : 0;
     const myDrawn = room.assignments?.[state.userId];
-    const shareLink = getShareLink(state.roomCode);
     const allAnswered = everyoneAnswered();
     let body = '';
-
-    const sharebox = `
-      <div class="share-box">
-        <span class="label">Share this link in Zoom chat</span>
-        <div class="share-link">${esc(shareLink)}</div>
-        <button class="btn-copy" id="copyBtn">Copy Link</button>
-      </div>`;
 
     if (room.phase === 'waiting') {
       body = `
         <div class="section">
-          ${sharebox}
+          ${renderShareBox()}
           <div class="divider"></div>
           <span class="label">Ask a Question</span>
           <textarea id="qDraft" rows="3" placeholder="Type your question here...">${esc(state.questionDraft)}</textarea>
@@ -337,6 +322,8 @@
     if (room.phase === 'open') {
       body = `
         <div class="section">
+          ${renderShareBox()}
+          <div class="divider"></div>
           <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
           ${renderAnswerArea()}
           <div class="ctrl-divider"></div>
@@ -344,16 +331,20 @@
           <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
           <p class="progress-text">${sc} of ${pc} answered</p>
           <button class="${allAnswered ? 'btn-success' : 'btn-danger'}" id="closeBtn">Close &amp; Draw from Hat</button>
-          <p class="hint">${allAnswered ? 'Everyone has answered! Ready to draw.' : 'Close early if someone left without answering.'}</p>
+          <p class="close-hint hint">${allAnswered ? 'Everyone has answered! Ready to draw.' : 'Close early if someone left without answering.'}</p>
         </div>`;
     }
 
     if (room.phase === 'reveal') {
       const mySlip = myDrawn
-        ? `<span class="label">You Drew...</span><div class="drawn-answer">🎩 ${esc(myDrawn)}</div>`
+        ? `<span class="label">You Drew...</span>
+           <div class="drawn-answer">🎩 ${esc(myDrawn)}</div>
+           <button class="btn-copy" id="concernBtn">Copy to clipboard</button>`
         : `<div class="status-box">You did not submit an answer so you were not assigned one.</div>`;
       body = `
         <div class="section">
+          ${renderShareBox()}
+          <div class="divider"></div>
           <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
           ${mySlip}
           <div class="ctrl-divider"></div>
@@ -384,6 +375,11 @@
     if (cb) cb.addEventListener('click', closeAndDraw);
     const nb = document.getElementById('nextBtn');
     if (nb) nb.addEventListener('click', nextQuestion);
+    const concernBtn = document.getElementById('concernBtn');
+    if (concernBtn) {
+      const myDrawn = state.room.assignments?.[state.userId];
+      if (myDrawn) concernBtn.addEventListener('click', () => copyConcern(myDrawn));
+    }
   }
 
   function renderParticipant() {
@@ -414,7 +410,8 @@
              <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
              <span class="label">You Drew...</span>
              <div class="drawn-answer">🎩 ${esc(myDrawn)}</div>
-             <p class="hint">Someone in the session wrote this. Read it aloud when it is your turn.</p>
+             <button class="btn-copy" id="concernBtn">Copy to clipboard</button>
+             <p class="hint">Read this aloud when it is your turn.</p>
            </div>`
         : `<div class="section">
              <div class="question-box"><span class="q-label">Q</span><span>${esc(room.question)}</span></div>
@@ -431,6 +428,11 @@
 
   function bindParticipant() {
     bindAnswerArea();
+    const concernBtn = document.getElementById('concernBtn');
+    if (concernBtn) {
+      const myDrawn = state.room.assignments?.[state.userId];
+      if (myDrawn) concernBtn.addEventListener('click', () => copyConcern(myDrawn));
+    }
   }
 
   function boot() {
@@ -465,7 +467,7 @@
   .btn-danger:hover { background: #a03535; }
   .btn-success { background: #2e6b3e; box-shadow: 0 0 0 4px #a8d5b5; }
   .btn-success:hover { background: #3a7a4a; }
-  .btn-copy { background: #444; font-size: 14px; padding: 10px; margin-top: 8px; border-radius: 6px; }
+  .btn-copy { background: #444; font-size: 15px; padding: 12px; border-radius: 6px; margin-bottom: 12px; }
   .btn-copy:hover { background: #222; }
   .share-box { background: #f8f8f4; border: 2px solid #ccc; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
   .share-link { font-family: monospace; font-size: 13px; color: #2e6b3e; word-break: break-all; margin: 8px 0 4px; line-height: 1.6; }
